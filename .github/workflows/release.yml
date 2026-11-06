@@ -1,0 +1,100 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  package:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: darwin-arm64
+          - os: macos-15
+            # Cross-compiled archive only: static libraries never link
+            # against libevent, so the arm64 kegs' headers suffice.
+            target: darwin-x86_64
+            cmake_extra: "-DCMAKE_OSX_ARCHITECTURES=x86_64"
+          - os: ubuntu-24.04
+            target: linux-x86_64
+          - os: ubuntu-24.04-arm
+            target: linux-aarch64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libevent-dev libssl-dev gcc-14 g++-14 libasan8 libubsan1
+          # gcc-13 is the system default but lacks <print>.
+          echo "CC=gcc-14" >> "$GITHUB_ENV"
+          echo "CXX=g++-14" >> "$GITHUB_ENV"
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install libevent openssl@3 || {
+            brew update
+            brew install libevent openssl@4
+          }
+          ossl="$(brew --prefix openssl@3 2>/dev/null || brew --prefix openssl@4)"
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix libevent):${ossl}" >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: >
+          cmake --preset release
+          -DBG_RAFT_BUILD_TESTS=OFF
+          -DBG_RAFT_BUILD_EXAMPLES=OFF
+          ${{ matrix.cmake_extra }}
+
+      - name: Build
+        run: cmake --build --preset release -j "$(getconf _NPROCESSORS_ONLN)"
+
+      - name: Package
+        run: |
+          pkg="bgraft-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          cmake --install build/release --prefix "package/${pkg}"
+          tar -C package -czf "${pkg}.tar.gz" "${pkg}"
+          # macOS runners lack sha256sum; shasum needs -a 256.
+          if command -v sha256sum > /dev/null; then
+            sha256sum "${pkg}.tar.gz" > "${pkg}.tar.gz.sha256"
+          else
+            shasum -a 256 "${pkg}.tar.gz" > "${pkg}.tar.gz.sha256"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bgraft-${{ github.ref_name }}-${{ matrix.target }}
+          path: |
+            bgraft-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+            bgraft-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    name: GitHub release
+    needs: package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bgraft-${{ github.ref_name }}-*
+          merge-multiple: true
+          path: dist
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            ./dist/*.tar.gz ./dist/*.sha256 \
+            --verify-tag \
+            --generate-notes \
+            --title "libbgraft ${GITHUB_REF_NAME}"

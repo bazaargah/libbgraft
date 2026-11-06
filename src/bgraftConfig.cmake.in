@@ -1,0 +1,13 @@
+@PACKAGE_INIT@
+
+# libevent provides no upstream CMake package, so libbgraft ships its own
+# FindLIBEVENT.cmake next to this file; the dependency search below makes
+# BG::bgraft's link interface resolvable for consumers out of the box.
+list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
+
+include(CMakeFindDependencyMacro)
+find_dependency(LIBEVENT COMPONENTS OpenSSL)
+
+include("${CMAKE_CURRENT_LIST_DIR}/bgraftTargets.cmake")
+
+check_required_components(bgraft)

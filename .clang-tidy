@@ -1,0 +1,69 @@
+# clang-tidy configuration for libbgraft.
+#
+# Correctness-focused defaults: clang-analyzer, bugprone, cert, concurrency,
+# C++ Core Guidelines, performance, modernize and readability checks are all
+# on, with only the loudest stylistic opinions switched off (see comments).
+# Trailing return types are the house style, so modernize-use-trailing-return-
+# type stays enabled project-wide.
+#
+# Usage:
+#   clang-tidy -p build/debug src/state.cc            # one translation unit
+#   clang-tidy --fix -p build/debug $(find src tests examples -name '*.cc')
+---
+Checks: >
+  clang-analyzer-*,
+  bugprone-*,
+  cert-*,
+  concurrency-*,
+  cppcoreguidelines-*,
+  misc-*,
+  modernize-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-exception-escape,
+  -cert-err33-c,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -cppcoreguidelines-avoid-const-or-ref-data-members,
+  -cppcoreguidelines-avoid-do-while,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-avoid-non-const-global-variables,
+  -cppcoreguidelines-macro-to-enum,
+  -cppcoreguidelines-macro-usage,
+  -cppcoreguidelines-missing-std-forward,
+  -cppcoreguidelines-owning-memory,
+  -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+  -cppcoreguidelines-pro-bounds-avoid-unchecked-container-access,
+  -cppcoreguidelines-pro-bounds-constant-array-index,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-pro-type-vararg,
+  -cppcoreguidelines-rvalue-reference-param-not-moved,
+  -cppcoreguidelines-special-member-functions,
+  -misc-const-correctness,
+  -misc-include-cleaner,
+  -misc-no-recursion,
+  -misc-non-private-member-variables-in-classes,
+  -misc-unused-alias-decls,
+  -modernize-avoid-c-arrays,
+  -modernize-macro-to-enum,
+  -modernize-use-nodiscard,
+  -performance-enum-size,
+  -portability-avoid-pragma-once,
+  -readability-braces-around-statements,
+  -readability-function-cognitive-complexity,
+  -readability-identifier-length,
+  -readability-identifier-naming,
+  -readability-implicit-bool-conversion,
+  -readability-magic-numbers,
+  -readability-named-parameter,
+  -readability-redundant-access-specifiers,
+  -readability-use-concise-preprocessor-directives,
+HeaderFilterRegex: 'libbgraft/(include|src|tests|examples)/'
+CheckOptions:
+  # POSIX open()/fcntl() take a variadic mode/argument and this check
+  # provides no allowlist; printf-family creep is caught instead by
+  # modernize-use-std-print, which remains enabled.
+  - key: performance-move-const-arg.CheckTriviallyCopyableMove
+    value: false

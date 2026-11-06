@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: ["*"]
+    tags-ignore: ["*"]
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.preset }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
+        preset: [relwithdebinfo]
+        include:
+          # Sanitizer coverage (debug preset builds with ASan+UBSan) on the
+          # two fastest platforms.
+          - os: ubuntu-24.04
+            preset: debug
+          - os: macos-15
+            preset: debug
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libevent-dev libssl-dev gcc-14 g++-14 libasan8 libubsan1
+          # gcc-13 is the system default but lacks <print>; std::print and
+          # friends need the new runtime library.
+          echo "CC=gcc-14" >> "$GITHUB_ENV"
+          echo "CXX=g++-14" >> "$GITHUB_ENV"
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install libevent openssl@3 || {
+            brew update
+            brew install libevent openssl@4
+          }
+          ossl="$(brew --prefix openssl@3 2>/dev/null || brew --prefix openssl@4)"
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix libevent):${ossl}" >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: cmake --preset "${{ matrix.preset }}"
+
+      - name: Build
+        run: cmake --build --preset "${{ matrix.preset }}" -j "$(getconf _NPROCESSORS_ONLN)"
+
+      - name: Test
+        run: ctest --preset "${{ matrix.preset }}" --output-on-failure
