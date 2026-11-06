@@ -12,9 +12,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-15
+          - os: macos-26
             target: darwin-arm64
-          - os: macos-15
+          - os: macos-26
             # Cross-compiled archive only: static libraries never link
             # against libevent, so the arm64 kegs' headers suffice.
             target: darwin-x86_64
@@ -40,12 +40,14 @@ jobs:
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install libevent openssl@3 || {
+          brew install libevent || {
             brew update
-            brew install libevent openssl@4
+            brew install libevent
           }
-          ossl="$(brew --prefix openssl@3 2>/dev/null || brew --prefix openssl@4)"
-          echo "CMAKE_PREFIX_PATH=$(brew --prefix libevent):${ossl}" >> "$GITHUB_ENV"
+          # macos-26 defaults to OpenSSL 4, matching Homebrew's libevent
+          # linkage; never pin to an openssl@3 keg here (see ci.yml) — mixing
+          # two libssl majors in one process segfaults SSL_set_bio.
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix libevent)" >> "$GITHUB_ENV"
 
       - name: Configure
         run: >
@@ -92,6 +94,9 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # This job never checks out the repository, so gh cannot infer it
+          # from a git remote; point it at the workflow's repo explicitly.
+          GH_REPO: ${{ github.repository }}
         run: |
           gh release create "${GITHUB_REF_NAME}" \
             ./dist/*.tar.gz ./dist/*.sha256 \
