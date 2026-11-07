@@ -72,12 +72,14 @@ auto decode_body(MsgType type, std::span<const std::byte> payload)
     case MsgType::append_entries_resp: {
       auto success = c.take<std::uint8_t>();
       auto hint = c.take<std::uint64_t>();
-      if (!success || !hint) {
+      auto sm_wm = c.take<std::uint64_t>();
+      if (!success || !hint || !sm_wm) {
         return std::unexpected(Error::protocol_violation);
       }
       return AppendEntriesRespMsg{
           .success = *success != 0U,
           .hint_index = *hint,
+          .sm_index = *sm_wm,
       };
     }
     case MsgType::install_snapshot: {
@@ -167,11 +169,12 @@ auto build_append_entries(std::uint64_t prev_index, std::uint64_t prev_term,
   return p;
 }
 
-auto build_append_resp(bool success, std::uint64_t hint_index)
-    -> std::vector<std::byte> {
+auto build_append_resp(bool success, std::uint64_t hint_index,
+                       std::uint64_t sm_index) -> std::vector<std::byte> {
   std::vector<std::byte> p;
   be_write(p, static_cast<std::uint8_t>(success ? 1U : 0U));
   be_write(p, hint_index);
+  be_write(p, sm_index);
   return p;
 }
 

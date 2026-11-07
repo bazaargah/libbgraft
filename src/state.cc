@@ -61,6 +61,10 @@ auto State::start() -> Result<void> {
       [this] -> void {
         if (role_ == Role::leader) {
           broadcast_append();
+          // Re-publish the durable picture each tick: own watermark may
+          // have advanced (batched flushes report lazily) and edges fire
+          // watchers only on change, so this stays quiet at steady state.
+          sync_durable();
         }
       },
       true);
@@ -172,6 +176,7 @@ auto State::become_follower(std::uint64_t new_term, std::uint64_t new_leader)
   if (stepped_up_term) {
     term_ = new_term;
     voted_for_ = 0U;
+    peer_durable_.clear();  // reports belonged to an older term's picture
     if (auto r = log_.set_current_term(term_); !r) {
       logf(LogLevel::error, "term persist failed");
     }
@@ -197,6 +202,7 @@ auto State::become_leader() -> void {
   role_ = Role::leader;
   leader_id_ = cfg_.node_id;
   tracks_.clear();
+  peer_durable_.clear();  // fresh term: nobody has reported under it yet
   for (const auto id : cluster_peers_) {
     auto& track = tracks_[id];
     track.next_index = log_.last_index() + 1U;
@@ -413,7 +419,7 @@ auto State::on_append(std::uint64_t src, const WireMessage& msg) -> void {
   const auto& append = std::get<AppendEntriesMsg>(msg.body);
   if (msg.term < term_) {
     send_msg(src, MsgType::append_entries_resp, 0U, term_,
-             build_append_resp(false, 0U));
+             build_append_resp(false, 0U, sm_.durable_watermark()));
     return;
   }
 
@@ -437,7 +443,7 @@ auto State::on_append(std::uint64_t src, const WireMessage& msg) -> void {
     if (!pt || !matches) {
       const auto hint = hint_for(append.prev_log_term, append.prev_log_index);
       send_msg(src, MsgType::append_entries_resp, 0U, term_,
-               build_append_resp(false, hint));
+               build_append_resp(false, hint, sm_.durable_watermark()));
       return;
     }
   }
@@ -479,7 +485,7 @@ auto State::on_append(std::uint64_t src, const WireMessage& msg) -> void {
       logf(LogLevel::error, "node {} append failed on replication",
            cfg_.node_id);
       send_msg(src, MsgType::append_entries_resp, 0U, term_,
-               build_append_resp(false, log_.last_index()));
+               build_append_resp(false, log_.last_index(), sm_.durable_watermark()));
       return;
     }
   }
@@ -497,7 +503,7 @@ auto State::on_append(std::uint64_t src, const WireMessage& msg) -> void {
     commit_ = std::min(append.leader_commit, log_.last_index());
   }
   send_msg(src, MsgType::append_entries_resp, 0U, term_,
-           build_append_resp(true, 0U));
+           build_append_resp(true, 0U, sm_.durable_watermark()));
   apply_upto();
 }
 
@@ -516,6 +522,10 @@ auto State::on_append_resp(std::uint64_t src, const WireMessage& msg) -> void {
   auto& track = tracks_[src];
   track.inflight = false;
 
+  // Term-fenced by construction: this runs only after the msg.term == term_
+  // gate above, so every recorded report arrived under current leadership.
+  peer_durable_[src] = resp.sm_index;
+
   if (resp.success) {
     const auto match = track.inflight_prev + track.inflight_count;
     if (match > track.match_index) {
@@ -523,6 +533,7 @@ auto State::on_append_resp(std::uint64_t src, const WireMessage& msg) -> void {
       track.next_index = match + 1U;
     }
     advance_commit();
+    sync_durable();
     // Pipeline the next batch only when one exists; otherwise the
     // heartbeat timer owns the connection (no empty-append ping-pong).
     if (track.next_index <= log_.last_index()) {
@@ -573,6 +584,51 @@ auto State::apply_upto() -> void {
     ++applied_;
   }
   publish();
+  sync_durable();
+}
+
+auto State::sync_durable() -> void {
+  const auto local = sm_.durable_watermark();
+  shared_.sm_durable.store(local, std::memory_order_relaxed);
+
+  // Cluster picture (leader only): the minimum over self and every member's
+  // current-term report. Missing reports make it "unknown" (published as 0,
+  // and per-peer queries answer not_certain) — never a stale guess.
+  std::uint64_t min_all = local;
+  bool full = true;
+  if (role_ == Role::leader) {
+    for (const auto id : cluster_peers_) {
+      const auto it = peer_durable_.find(id);
+      if (it == peer_durable_.end()) {
+        full = false;
+        break;
+      }
+      min_all = std::min(min_all, it->second);
+    }
+  }
+  const std::uint64_t pub = full ? min_all : 0U;
+
+  bool changed = pub != durable_pub_;
+  std::vector<Node::DurableWatermarkCallback> fire;
+  {
+    const std::lock_guard<std::mutex> lock(shared_.meta_mtx);
+    changed = changed || shared_.peer_durable != peer_durable_;
+    shared_.peer_durable = peer_durable_;
+    if (changed) {
+      fire.reserve(shared_.durable_watch.size());
+      for (const auto& watcher : shared_.durable_watch) {
+        fire.push_back(watcher.second);
+      }
+    }
+  }
+  if (!changed) {
+    return;
+  }
+  durable_pub_ = pub;
+  shared_.durable_min.store(pub, std::memory_order_relaxed);
+  for (auto& callback : fire) {
+    loop_.post([callback] -> void { callback(); });
+  }
 }
 
 auto State::flush_waiters_committed() -> void {

@@ -8,6 +8,7 @@
 #include <deque>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <span>
 #include <string_view>
@@ -27,6 +28,18 @@ struct SharedFlags {
   std::atomic<std::uint64_t> term;
   std::atomic<std::uint64_t> leader;  // 0 = unknown
   std::atomic<std::uint64_t> applied;
+
+  // Durable state-machine watermarks. sm_durable is this node's own;
+  // durable_min is the leader-computed minimum over all members, valid only
+  // while every member has reported in the current term (0 otherwise).
+  // peer_durable mirrors the leader's per-member view for cross-thread
+  // reads. meta_mtx guards peer_durable and the durable watch registry.
+  std::atomic<std::uint64_t> sm_durable{0};
+  std::atomic<std::uint64_t> durable_min{0};
+  std::mutex meta_mtx;
+  std::map<std::uint64_t, std::uint64_t> peer_durable;
+  std::map<std::uint64_t, Node::DurableWatermarkCallback> durable_watch;
+  std::uint64_t durable_watch_seq = 0;
 };
 
 class State {
@@ -101,6 +114,9 @@ class State {
   auto on_append_resp(std::uint64_t src, const WireMessage& msg) -> void;
   auto advance_commit() -> void;
   auto apply_upto() -> void;
+  // Mirror this node's durable watermark and the leader's cluster picture
+  // into the shared flags; fire the durable watch when the picture changes.
+  auto sync_durable() -> void;
   auto flush_waiters_committed() -> void;
   auto flush_waiters(Error error) -> void;
   auto hint_for(std::uint64_t prev_term, std::uint64_t prev_index) const
@@ -150,6 +166,11 @@ class State {
   std::deque<Waiter> waiters_;
   std::map<std::uint64_t, PeerTrack> tracks_;
   std::map<std::uint64_t, std::uint64_t> vote_granted_;  // peer -> term
+  // Leader-side: peer -> state-machine durable watermark, populated only
+  // from current-term AppendEntries responses; cleared on every leader term
+  // change so a stale leader's last picture never survives into a new term.
+  std::map<std::uint64_t, std::uint64_t> peer_durable_;
+  std::uint64_t durable_pub_{};   // last value mirrored to shared_.durable_min
   Rx rx_;
   std::mt19937_64 rng_{std::random_device{}()};
 };

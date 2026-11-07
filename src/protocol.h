@@ -79,6 +79,10 @@ struct AppendEntriesMsg {
 struct AppendEntriesRespMsg {
   bool success;
   std::uint64_t hint_index;
+  // The responder's state-machine durable watermark at send time. Fenced by
+  // the message header term; the leader only trusts reports from its own
+  // current term (see State::on_append_resp).
+  std::uint64_t sm_index;
 };
 
 struct InstallSnapshotMsg {
@@ -121,8 +125,8 @@ auto build_append_entries(std::uint64_t prev_index, std::uint64_t prev_term,
                           std::uint64_t leader_commit,
                           std::span<const LogEntry> entries)
     -> std::vector<std::byte>;
-auto build_append_resp(bool success, std::uint64_t hint_index)
-    -> std::vector<std::byte>;
+auto build_append_resp(bool success, std::uint64_t hint_index,
+                       std::uint64_t sm_index) -> std::vector<std::byte>;
 auto build_install_snapshot(std::uint64_t last_included_index,
                             std::uint64_t last_included_term,
                             std::uint64_t offset,

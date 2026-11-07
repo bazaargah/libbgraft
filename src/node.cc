@@ -41,6 +41,8 @@ auto to_string(Error error) -> std::string_view {
       return "busy";
     case Error::entry_too_large:
       return "entry_too_large";
+    case Error::not_certain:
+      return "not_certain";
   }
   return "invalid_error";
 }
@@ -213,6 +215,36 @@ auto Node::leader_id() const -> std::optional<std::uint64_t> {
 
 auto Node::last_applied() const -> std::uint64_t {
   return impl_->shared.applied.load(std::memory_order_relaxed);
+}
+
+auto Node::durable_watermark(std::uint64_t id) const -> Result<std::uint64_t> {
+  auto& shared = impl_->shared;
+  if (id == impl_->cfg.node_id) {
+    return shared.sm_durable.load(std::memory_order_relaxed);
+  }
+  const auto role = static_cast<Role>(shared.role.load(std::memory_order_relaxed));
+  if (role != Role::leader) {
+    return std::unexpected(Error::not_certain);  // only the leader tracks peers
+  }
+  const std::lock_guard<std::mutex> lock(shared.meta_mtx);
+  const auto it = shared.peer_durable.find(id);
+  if (it == shared.peer_durable.end()) {
+    return std::unexpected(Error::not_certain);
+  }
+  return it->second;
+}
+
+auto Node::watch_durable_watermark(DurableWatermarkCallback callback)
+    -> std::uint64_t {
+  const std::lock_guard<std::mutex> lock(impl_->shared.meta_mtx);
+  const auto id = ++impl_->shared.durable_watch_seq;
+  impl_->shared.durable_watch.emplace(id, std::move(callback));
+  return id;
+}
+
+auto Node::unsubscribe_durable_watermark(std::uint64_t id) -> void {
+  const std::lock_guard<std::mutex> lock(impl_->shared.meta_mtx);
+  impl_->shared.durable_watch.erase(id);
 }
 
 auto Node::make_snapshot() -> Result<std::uint64_t> {

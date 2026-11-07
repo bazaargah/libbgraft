@@ -136,7 +136,7 @@ void test_append_entries() {
     CHECK(p->entries[1].data.empty());
   });
 
-  const auto resp = build_append_resp(false, 7ULL);
+  const auto resp = build_append_resp(false, 7ULL, 41ULL);
   inspect(encode_frame(MsgType::append_entries_resp, 0U, 4ULL, resp),
           [](const WireMessage& got) -> void {
             const auto* ar = std::get_if<AppendEntriesRespMsg>(&got.body);
@@ -146,7 +146,28 @@ void test_append_entries() {
             }
             CHECK(!ar->success);
             CHECK_EQ(ar->hint_index, 7U);
+            CHECK_EQ(ar->sm_index, 41U);
           });
+  // Short AER payloads (pre-watermark shape) are a protocol violation.
+  std::vector<std::byte> legacy;
+  be_write(legacy, static_cast<std::uint8_t>(1U));
+  be_write(legacy, std::uint64_t{9});
+  {
+    auto* input = evbuffer_new();
+    const auto frame = encode_frame(MsgType::append_entries_resp, 0U, 4ULL,
+                                    legacy);
+    evbuffer_add(input, frame.data(), frame.size());
+    FrameReader reader;
+    bool called = false;
+    auto r = reader.feed(input, [&](const WireMessage&) -> Result<void> {
+      called = true;
+      return {};
+    });
+    CHECK(!r.has_value());
+    CHECK(r.error() == Error::protocol_violation);
+    CHECK(!called);
+    evbuffer_free(input);
+  }
 }
 
 void test_install_snapshot() {

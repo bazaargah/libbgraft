@@ -4,11 +4,15 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <format>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -35,6 +39,17 @@ class TestSm final : public StateMachine {
     applied_.emplace_back(entry.index, std::move(data));
     applied_index_ = entry.index;
   }
+
+  // Treat applied as durable unless capped; the cap simulates a state
+  // machine whose storage flush lags behind its apply.
+  auto durable_watermark() const -> std::uint64_t override {
+    const auto cap = durable_cap.load();
+    std::scoped_lock lock(mutex_);
+    return std::min(applied_index_, cap);
+  }
+
+  std::atomic<std::uint64_t> durable_cap{
+      std::numeric_limits<std::uint64_t>::max()};
 
   auto take_snapshot(int fd) -> Result<void> override {
     std::scoped_lock lock(mutex_);
@@ -555,6 +570,112 @@ void test_foreign_cluster_dropped(Cluster& cluster) {
 // against a plaintext peer and against a peer holding valid certificates
 // from a foreign CA — both with the correct cluster id, so only the
 // transport layer can keep them out.
+void test_durable_watermark(Cluster& cluster) {
+  cluster.start_all();
+  CHECK(wait_for(
+      [&] -> bool { return leader_of(cluster.members()) != nullptr; }, 10s));
+  auto* leader = leader_of(cluster.members());
+  auto* follower = cluster.members()[0].get() == leader
+                       ? cluster.members()[1].get()
+                       : cluster.members()[0].get();
+
+  std::atomic<int> watch_fires{0};
+  const auto watch_id = leader->node->watch_durable_watermark(
+      [&] -> void { ++watch_fires; });
+
+  std::vector<std::byte> e1{std::byte{1}};
+  const auto first =
+      leader->node->submit(std::span<const std::byte>(e1));
+  CHECK(first.has_value());
+  const auto target = first->index;
+
+  // Everyone applies and reports their own watermark.
+  CHECK(wait_for(
+      [&] -> bool {
+        for (auto& member : cluster.members()) {
+          const auto w = member->node->durable_watermark(
+              member->cfg.node_id);
+          if (!w || *w < target) {
+            return false;
+          }
+        }
+        return true;
+      },
+      15s));
+
+  // The leader tracks each follower's report (arrives via append/heartbeat
+  // responses), and the watch has been firing along the way.
+  CHECK(wait_for(
+      [&] -> bool {
+        const auto w = leader->node->durable_watermark(follower->cfg.node_id);
+        return w && *w >= target;
+      },
+      10s));
+  CHECK(watch_fires.load() > 0);
+
+  // Freeze one follower's durability, then outpace it: the leader's view of
+  // that member must stick at the frozen report while the rest advances.
+  const auto frozen = follower->sm->durable_watermark();
+  follower->sm->durable_cap = frozen;
+  std::vector<std::byte> e2{std::byte{2}};
+  const auto second =
+      leader->node->submit(std::span<const std::byte>(e2));
+  CHECK(second.has_value());
+  CHECK(wait_for(
+      [&] -> bool {
+        const auto w = leader->node->durable_watermark(follower->cfg.node_id);
+        return w && *w == frozen;
+      },
+      10s));
+  CHECK(wait_for(
+      [&] -> bool {
+        return leader->node->durable_watermark(leader->cfg.node_id).value_or(
+                   0U) >= second->index;
+      },
+      15s));
+  auto cluster_min = [&] -> std::uint64_t {
+    std::uint64_t worst = std::numeric_limits<std::uint64_t>::max();
+    for (auto& member : cluster.members()) {
+      const auto w = leader->node->durable_watermark(member->cfg.node_id);
+      if (!w) {
+        return 0U;  // unknown member: nothing is confirmed
+      }
+      worst = std::min(worst, *w);
+    }
+    return worst;
+  };
+  CHECK(wait_for([&] -> bool { return cluster_min() == frozen; }, 10s));
+
+  // Unfreeze: the minimum catches up and the watcher reacts again.
+  const int fires_before = watch_fires.load();
+  follower->sm->durable_cap = std::numeric_limits<std::uint64_t>::max();
+  CHECK(wait_for([&] -> bool { return cluster_min() >= second->index; }, 15s));
+  CHECK(watch_fires.load() > fires_before);
+
+  // Unknown member ids, and peers-as-seen-from-followers, are not_certain.
+  const auto ghost = leader->node->durable_watermark(9999U);
+  CHECK(!ghost);
+  if (ghost) {
+    CHECK(false);
+  }
+  auto* bystander = cluster.members()[0].get() == leader
+                        ? cluster.members()[2].get()
+                        : cluster.members()[1].get();
+  if (bystander != leader) {
+    // bystander is a follower: it does not track anyone.
+    const auto from_f = bystander->node->durable_watermark(leader->cfg.node_id);
+    CHECK(!from_f);
+    CHECK(from_f.error() == Error::not_certain);
+  }
+  leader->node->unsubscribe_durable_watermark(watch_id);
+
+  for (auto& member : cluster.members()) {
+    if (member->node != nullptr) {
+      member->node->shutdown();
+    }
+  }
+}
+
 void test_tls_transport() {
   const std::string certs = temp_dir("tls_certs");
   const std::string foreign = temp_dir("tls_foreign_certs");
@@ -654,6 +775,8 @@ auto main() -> int {
   test_restart_replays(cluster);
   test_out_of_band_snapshot(cluster);
   test_foreign_cluster_dropped(cluster);
+  Cluster durable{"durable"};
+  test_durable_watermark(durable);
   test_tls_transport();
   return bgraft_test::summary("cluster");
 }

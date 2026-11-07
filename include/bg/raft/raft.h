@@ -43,6 +43,8 @@ enum class Error : std::int16_t {
   not_found = -10,
   busy = -11,
   entry_too_large = -12,
+  not_certain = -13,  // State-machine durable watermark unknown: the peer has
+                      //   not reported one in the leader's current term.
 };
 
 template <typename T>
@@ -142,6 +144,20 @@ class StateMachine {
   // Apply one committed entry. Entries are delivered in strict index order.
   virtual auto on_apply(const LogEntry& entry) -> void = 0;
 
+  // Durable state-machine watermark: the highest log index whose effects are
+  // persisted on stable storage (flushed/fsynced by the state machine
+  // itself). Entries above it may need re-applying after a crash — re-
+  // delivery from raft restarts at the last snapshot, so apply must be
+  // idempotent (the usual shape: skip anything <= this watermark).
+  //
+  // Returning 0 is always safe (says "nothing durable"), but it freezes the
+  // cluster's confirmed index as seen by Node::durable_watermark():
+  // applications that only commit once every member is durable — a ledger,
+  // for instance — must implement this method. Called on the loop thread.
+  [[nodiscard]] virtual auto durable_watermark() const -> std::uint64_t {
+    return 0;
+  }
+
   // Serialize the current state into the already-open POSIX fd.
   virtual auto take_snapshot(int fd) -> Result<void> = 0;
 
@@ -207,6 +223,29 @@ class BG_RAFT_API Node {
   [[nodiscard]] auto current_term() const -> std::uint64_t;
   [[nodiscard]] auto leader_id() const -> std::optional<std::uint64_t>;
   [[nodiscard]] auto last_applied() const -> std::uint64_t;
+
+  // Durable state-machine watermark (see StateMachine::durable_watermark).
+  //
+  // For `id` == this node's id, returns this node's own watermark — always
+  // known, on any role. For any other member, only the leader tracks it, and
+  // only from AppendEntries responses that arrived in the leader's current
+  // term: a member that has not reported yet (fresh election, or a peer that
+  // is down and silent) yields Error::not_certain rather than a stale guess.
+  // Applications that commit-at-full-durability take the minimum over all
+  // members and must treat not_certain as "not confirmed yet".
+  [[nodiscard]] auto durable_watermark(std::uint64_t id) const
+      -> Result<std::uint64_t>;
+
+  // Push notification for durable_watermark changes: fires on the loop
+  // thread when this node's watermark advances, or (for a leader) when the
+  // picture of the cluster minimum changes. Watchers should re-poll
+  // durable_watermark for every member they care about. Unsubscribe does not
+  // wait for an in-flight notification; a callback may fire once more after
+  // it. Returns an id for unsubscribe.
+  using DurableWatermarkCallback = std::function<void()>;
+  auto watch_durable_watermark(DurableWatermarkCallback callback)
+      -> std::uint64_t;
+  auto unsubscribe_durable_watermark(std::uint64_t id) -> void;
 
   // Snapshots the state machine at last_applied and compacts the log up to
   // that index. Allowed on any node; returns the new last_included_index.
