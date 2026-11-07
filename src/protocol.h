@@ -11,6 +11,8 @@
 #include <variant>
 #include <vector>
 
+#include "wire.h"
+
 struct evbuffer;
 
 // Compact fixed-width wire format. Header is exactly 12 bytes:
@@ -99,46 +101,6 @@ struct WireMessage {
   std::uint8_t flags{};
   std::uint64_t term{};
   MsgBody body;
-};
-
-// Bounds-checked sequential reader over a payload span.
-class Cursor {
- public:
-  explicit Cursor(std::span<const std::byte> data) : data_(data) {}
-
-  template <typename T>
-  auto take() -> Result<T> {
-    if (data_.size() - pos_ < sizeof(T)) {
-      return std::unexpected(Error::protocol_violation);
-    }
-    std::uint64_t raw = 0;
-    if constexpr (sizeof(T) == 1) {
-      raw = static_cast<unsigned char>(data_[pos_]);
-    } else {
-      raw = read_be(sizeof(T));
-    }
-    pos_ += sizeof(T);
-    return static_cast<T>(raw);
-  }
-
-  auto take_bytes(std::size_t n) -> Result<std::span<const std::byte>> {
-    if (data_.size() - pos_ < n) {
-      return std::unexpected(Error::protocol_violation);
-    }
-    const auto out = data_.subspan(pos_, n);
-    pos_ += n;
-    return out;
-  }
-
-  [[nodiscard]] auto remaining() const -> std::size_t {
-    return data_.size() - pos_;
-  }
-
- private:
-  auto read_be(std::size_t n) const -> std::uint64_t;
-
-  std::span<const std::byte> data_;
-  std::size_t pos_{};
 };
 
 // Decode a complete payload for `type` (payload may alias reader storage).

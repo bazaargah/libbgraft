@@ -1,2 +1,13 @@
+# Build output
 build/
 .cache/
+
+# OS and editor junk
+.DS_Store
+*.swo
+*.swp
+*~
+
+# IDE / editor project files
+.idea/
+.vscode/

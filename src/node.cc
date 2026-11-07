@@ -7,7 +7,7 @@
 #include <string_view>
 #include <utility>
 
-#include "detail/log.h"
+#include "diag.h"
 #include "log.h"
 #include "loop.h"
 #include "state.h"

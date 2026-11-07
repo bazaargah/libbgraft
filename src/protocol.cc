@@ -4,18 +4,9 @@
 
 #include <algorithm>
 
-#include "detail/be.h"
-#include "detail/log.h"
+#include "diag.h"
 
 namespace bg::raft::detail {
-
-auto Cursor::read_be(std::size_t n) const -> std::uint64_t {
-  std::uint64_t value = 0;
-  for (std::size_t i = 0; i < n; ++i) {
-    value = (value << 8U) | static_cast<unsigned char>(data_[pos_ + i]);
-  }
-  return value;
-}
 
 auto decode_body(MsgType type, std::span<const std::byte> payload)
     -> Result<MsgBody> {

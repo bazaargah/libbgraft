@@ -27,6 +27,7 @@ libbgraft is part of **Bazaargah**, a distributed software system — the
 | C++23 compiler + stdlib | Apple Clang 21+ / LLVM 19+ / GCC 14+ |
 | libevent | 2+ (built against OpenSSL if you want TLS) |
 | OpenSSL | 3+ (only with TLS enabled) |
+| libbgwire | pinned tag, fetched automatically via FetchContent; for a local checkout use `-DFETCHCONTENT_SOURCE_DIR_BGWIRE=/path` |
 
 ## Build
 

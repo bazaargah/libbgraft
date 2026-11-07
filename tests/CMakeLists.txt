@@ -12,13 +12,6 @@ target_compile_options(log_test PRIVATE -Wall -Wextra)
 add_test(NAME log COMMAND log_test)
 set_tests_properties(log PROPERTIES TIMEOUT 60)
 
-add_executable(crc32_test crc32_test.cc)
-target_include_directories(crc32_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
-target_link_libraries(crc32_test PRIVATE bgraft)
-target_compile_options(crc32_test PRIVATE -Wall -Wextra)
-add_test(NAME crc32 COMMAND crc32_test)
-set_tests_properties(crc32 PROPERTIES TIMEOUT 30)
-
 add_executable(cluster_test cluster_test.cc)
 target_link_libraries(cluster_test PRIVATE bgraft)
 target_compile_options(cluster_test PRIVATE -Wall -Wextra)

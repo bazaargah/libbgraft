@@ -9,9 +9,9 @@
 #include <string>
 #include <utility>
 
-#include "detail/be.h"
-#include "detail/fs.h"
-#include "detail/log.h"
+#include "diag.h"
+#include "fs.h"
+#include "wire.h"
 
 namespace bg::raft::detail {
 

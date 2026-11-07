@@ -9,9 +9,8 @@
 #include <cstring>
 #include <utility>
 
-#include "detail/be.h"
-#include "detail/crc32.h"
-#include "detail/fs.h"
+#include "fs.h"
+#include "wire.h"
 
 namespace bg::raft::detail {
 

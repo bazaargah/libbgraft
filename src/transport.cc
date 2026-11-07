@@ -14,7 +14,7 @@
 #include <string>
 #include <utility>
 
-#include "detail/log.h"
+#include "diag.h"
 
 namespace bg::raft::detail {
 
