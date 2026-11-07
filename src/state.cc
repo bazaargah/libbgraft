@@ -484,8 +484,9 @@ auto State::on_append(std::uint64_t src, const WireMessage& msg) -> void {
     if (auto r = log_.append(new_entries); !r) {
       logf(LogLevel::error, "node {} append failed on replication",
            cfg_.node_id);
-      send_msg(src, MsgType::append_entries_resp, 0U, term_,
-               build_append_resp(false, log_.last_index(), sm_.durable_watermark()));
+      send_msg(
+          src, MsgType::append_entries_resp, 0U, term_,
+          build_append_resp(false, log_.last_index(), sm_.durable_watermark()));
       return;
     }
   }
@@ -562,12 +563,24 @@ auto State::advance_commit() -> void {
   }
   std::ranges::sort(matches, std::greater<>());
   const auto candidate = matches[quorum() - 1U];
-  while (commit_ < candidate) {
-    auto t = log_.term_at(commit_ + 1U);
-    if (!t || *t != term_) {
-      break;  // only commit entries of the current term directly
+  // Canonical Raft (Ongaro thesis §5.3/§5.4.2, as in etcd raft): a leader
+  // commits by counting current-term entries; once an index N <= candidate
+  // with term == current term is replicated to a quorum, EVERY entry below
+  // N commits transitively (log prefix + Match property ⇒ no replica can
+  // later drop them). Walking up from commit_+1 and breaking on an
+  // older-term entry instead strands commit forever after any leader
+  // change that leaves an uncommitted old-term entry — reproduced 100%
+  // when the leader dies with entries its successor replicated.
+  auto target = candidate;
+  while (target > commit_) {
+    const auto t = log_.term_at(target);
+    if (t && *t == term_) {
+      break;
     }
-    ++commit_;
+    --target;
+  }
+  if (target > commit_) {
+    commit_ = target;
   }
   flush_waiters_committed();
   apply_upto();
@@ -721,8 +734,9 @@ auto State::start_install(std::uint64_t peer_id, PeerTrack& track) -> void {
   track.tx.offer_pending = true;
   track.tx.index = log_.last_included_index();
   track.tx.term = log_.last_included_term();
-  if (!send_msg(peer_id, MsgType::install_snapshot, kFlagOffer, term_,
-                build_install_snapshot(track.tx.index, track.tx.term, 0U, {}))) {
+  if (!send_msg(
+          peer_id, MsgType::install_snapshot, kFlagOffer, term_,
+          build_install_snapshot(track.tx.index, track.tx.term, 0U, {}))) {
     track.tx = Tx{};  // Nothing on the wire: retry the offer later.
     return;
   }
@@ -746,11 +760,11 @@ auto State::send_snapshot_chunk(std::uint64_t peer_id, PeerTrack& track)
   const bool final = static_cast<std::size_t>(got) < buf.size();
   tx.last_len = static_cast<std::uint64_t>(got);
   tx.final_pending = final;
-  send_msg(peer_id, MsgType::install_snapshot, final ? kFlagFinal : 0U, term_,
-           build_install_snapshot(
-               tx.index, tx.term, tx.offset,
-               std::span<const std::byte>(
-                   buf.data(), static_cast<std::size_t>(got))));
+  send_msg(
+      peer_id, MsgType::install_snapshot, final ? kFlagFinal : 0U, term_,
+      build_install_snapshot(tx.index, tx.term, tx.offset,
+                             std::span<const std::byte>(
+                                 buf.data(), static_cast<std::size_t>(got))));
 }
 
 auto State::on_install(std::uint64_t src, const WireMessage& msg) -> void {
